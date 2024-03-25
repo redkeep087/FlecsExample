@@ -30,8 +30,17 @@ TestFlecsSetup::TestFlecsSetup(UWorld* _world, flecs::world* _ecs) : UFlecsSetup
 		TRACE_CPUPROFILER_EVENT_SCOPE_STR("FLECS Update position"); {
 			a.ptr->GetActor()->SetActorLocation(p.value);
 		}
-			});
+	});
 	update_position_actor_flecs.enable();
+
+	auto update_rotation_actor_flecs = _ecs->system<FlecsRotationZ&, FlecsCommunicator&>("Update flecs rotation Actor")
+		.multi_threaded()
+		.kind<FlecsFixedUpdate>()
+		.each([](FlecsRotationZ& r, FlecsCommunicator& a) {
+		TRACE_CPUPROFILER_EVENT_SCOPE_STR("FLECS Update position"); {
+			a.ptr->GetActor()->SetActorRotation(FRotator(0, r.value, 0));
+		}
+	});
 
 	auto update_follow_actor = _ecs->system<FlecsNavigationSingleton&, FlecsPosition&, FlecsFollowActorTarget&>("Update Follow Actor")
 		.multi_threaded()
@@ -44,14 +53,29 @@ TestFlecsSetup::TestFlecsSetup(UWorld* _world, flecs::world* _ecs) : UFlecsSetup
 		const float compareDist = 20;
 		const float sqrCompareDist = compareDist * compareDist;
 		if (sqrDist > compareDist) {
-			at.targetLocation = targetLocation;
-			// TODO make it Asynchronous
+			// TODO: make it Asynchronous
 			UNavigationPath* NavPath = navSingleton.NavSystem->FindPathToLocationSynchronously(navSingleton.NavSystem->GetWorld(), p.value, targetLocation);
 			if (NavPath && NavPath->IsValid())
 			{
 				e.set<FlecsNavigationPath>({ NavPath->PathPoints });
 				e.set<FlecsFollowTarget>({ NavPath->PathPoints[0] });
 			}
+
+			// TODO: Maybe influence Z axis of target position? if (navSingleton.NavSystem->ProjectPointToNavigation(p.value, newLocation, FVector::OneVector * 500)) {
+			const float groundTraceLength = 500;
+			FHitResult GroundHit(1.f);
+			FVector pos = targetLocation;
+			navSingleton.NavSystem->GetWorld()->LineTraceSingleByChannel(
+				GroundHit,
+				pos + FVector::UpVector * groundTraceLength * 0.25,
+				pos + FVector::DownVector * groundTraceLength * 1.25,
+				ECollisionChannel::ECC_Visibility);
+
+			if (GroundHit.IsValidBlockingHit()) {
+				targetLocation = FVector(targetLocation.X, targetLocation.Y, GroundHit.ImpactPoint.Z);
+				at.actor->SetActorLocation(targetLocation);
+			}
+			at.targetLocation = targetLocation;
 		}
 		});
 
@@ -75,11 +99,12 @@ TestFlecsSetup::TestFlecsSetup(UWorld* _world, flecs::world* _ecs) : UFlecsSetup
 		}
 		});
 
-	auto update_follow_path = _ecs->system<FlecsNavigationSingleton&, FlecsPosition&, FlecsFollowTarget&>("Update follow target")
+	// TODO: Fix stutter behavior on each turn
+	auto update_follow_path = _ecs->system<FlecsNavigationSingleton&, FlecsPosition&, FlecsRotationZ, FlecsFollowTarget&>("Update follow target")
 		.multi_threaded()
 		.term_at(1).singleton()
 		.kind<FlecsFixedUpdate>()
-		.each([](FlecsNavigationSingleton& navSingleton, FlecsPosition& p, FlecsFollowTarget& t) {
+		.each([](FlecsNavigationSingleton& navSingleton, FlecsPosition& p, FlecsRotationZ& r, FlecsFollowTarget& t) {
 		TRACE_CPUPROFILER_EVENT_SCOPE_STR("FLECS Update follow target"); {
 			const float groundTraceLength = 500;
 			FNavLocation newLocation;
@@ -122,7 +147,17 @@ TestFlecsSetup::TestFlecsSetup(UWorld* _world, flecs::world* _ecs) : UFlecsSetup
 
 			p.value += Direction * FMath::Min(DistanceThisFrame, DistBetweenPoints);
 
-			UE_LOG(LogTemp, Warning, TEXT("MOVED IN %f about %f"), FIXED_TIME, DistBetweenPoints);
+			float newAngle = FMath::RadiansToDegrees(FMath::Atan2(Direction.Y, Direction.X));
+			
+			/*Basically it is 10 angle per tick. More accurately 10 / 0.04 = 250. If you want let's say 20 angle per tick then type 20 / 0.04 = 500*/
+			const float angleSpeed = 10;
+			const float desiredAngleSpeed = angleSpeed / FIXED_TIME;
+
+			float lerpedAngle = FMath::RInterpConstantTo(FRotator(0, r.value, 0), FRotator(0, newAngle, 0), FIXED_TIME, desiredAngleSpeed).Yaw;
+
+			r.value = lerpedAngle;;
+
+			UE_LOG(LogTemp, Warning, TEXT("MOVED IN %f about %f and angle is %f"), FIXED_TIME, DistBetweenPoints, lerpedAngle);
 		}
 		});
 }
@@ -143,6 +178,7 @@ FFlecsEntityHandle TestFlecsSetup::RegisterFlecsActor(IFlecsClient* actor) {
 	auto entity = ecs->entity();
 	entity.set<FlecsTransform>({ actor->GetActor()->GetTransform() });
 	entity.set<FlecsPosition>({ actor->GetActor()->GetActorLocation() });
+	entity.set<FlecsRotationZ>({ static_cast<float>(actor->GetActor()->GetActorRotation().Yaw) });
 	entity.set<FlecsCommunicator>({ actor });
 	return FFlecsEntityHandle({ entity });
 }
