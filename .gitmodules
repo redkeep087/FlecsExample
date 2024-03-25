@@ -1,0 +1,3 @@
+[submodule "Plugins/FlecsLibraryUE"]
+	path = Plugins/FlecsLibraryUE
+	url = https://github.com/redkeep087/FlecsLibraryUE
